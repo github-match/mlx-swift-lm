@@ -85,11 +85,12 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
         configuration: LoRAConfiguration,
         parameters: consuming ModuleParameters
     ) {
+        let evaluatedParameters = parameters
         // ensure that the parameters are fully evaluated before we promise
         // that they are Sendable
-        eval(parameters)
+        eval(evaluatedParameters)
         self.configuration = configuration
-        self.parameters = parameters
+        self.parameters = evaluatedParameters
     }
 
     /// Creates a `LoRAContainer` by applying the configuration to a compatible `LanguageModel`.

@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+import AVFoundation
 import CoreImage
 import Foundation
 import MLX
@@ -110,5 +111,97 @@ public class ChatSessionIntegrationTests: XCTestCase {
             response.lowercased().contains("bob"),
             "Model should recognize the name 'Bob' from the injected history, proving successful prompt re-hydration."
         )
+    }
+}
+
+public class Molmo2IntegrationTests: XCTestCase {
+    static let molmo2ModelId = "mlx-community/Molmo2-8B-4bit"
+    static let molmo2SnapshotEnvKey = "MOLMO2_SNAPSHOT_PATH"
+    nonisolated(unsafe) static var molmo2Container: ModelContainer?
+
+    private static func molmo2SnapshotURL() -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+        if let override = environment[molmo2SnapshotEnvKey], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        let repoPath = "models--" + molmo2ModelId.replacingOccurrences(of: "/", with: "--")
+        let snapshotsRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface/hub")
+            .appendingPathComponent(repoPath)
+            .appendingPathComponent("snapshots")
+        guard let candidates = try? FileManager.default.contentsOfDirectory(
+            at: snapshotsRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        let directories = candidates.filter {
+            (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+        }
+        return directories.sorted { $0.lastPathComponent < $1.lastPathComponent }.last
+    }
+
+    private static func molmo2Configuration() -> ModelConfiguration? {
+        guard let snapshotURL = molmo2SnapshotURL() else {
+            return nil
+        }
+        return ModelConfiguration(
+            directory: snapshotURL,
+            defaultPrompt: "Describe the image in English"
+        )
+    }
+
+    private func loadMolmo2Container() async throws -> ModelContainer {
+        if let container = Self.molmo2Container {
+            return container
+        }
+        guard let configuration = Self.molmo2Configuration() else {
+            throw XCTSkip(
+                "Molmo2 snapshot not found. Set MOLMO2_SNAPSHOT_PATH to a local snapshot directory."
+            )
+        }
+        let container = try await VLMModelFactory.shared.loadContainer(configuration: configuration)
+        Self.molmo2Container = container
+        return container
+    }
+
+    private func makeSolidImage(color: CIColor) -> CIImage {
+        CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: 128, height: 128))
+    }
+
+    func testMolmo2ImageSmoke() async throws {
+        let container = try await loadMolmo2Container()
+        let session = ChatSession(
+            container,
+            generateParameters: .init(maxTokens: 32, temperature: 0),
+            processing: .init()
+        )
+        let image = UserInput.Image.ciImage(
+            makeSolidImage(color: CIColor(red: 1, green: 0, blue: 0))
+        )
+        let result = try await session.respond(
+            to: "Describe the image.",
+            image: image
+        )
+        XCTAssertFalse(result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    func testMolmo2VideoSmoke() async throws {
+        let container = try await loadMolmo2Container()
+        let session = ChatSession(
+            container,
+            generateParameters: .init(maxTokens: 32, temperature: 0),
+            processing: .init()
+        )
+        let frame = UserInput.VideoFrame(
+            frame: makeSolidImage(color: CIColor(red: 1, green: 0, blue: 0)),
+            timeStamp: CMTime(seconds: 0, preferredTimescale: 30)
+        )
+        let result = try await session.respond(
+            to: "Describe the video.",
+            video: .frames([frame])
+        )
+        XCTAssertFalse(result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 }

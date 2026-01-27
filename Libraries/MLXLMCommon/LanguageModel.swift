@@ -73,27 +73,47 @@ public struct LMInput {
         public let pixels: MLXArray
         /// Time, height, and width of the images
         public let frames: [THW]?
+        /// Optional token pooling metadata for patch indices
+        public let tokenPooling: MLXArray?
+        /// Optional grid metadata for pooled tokens
+        public let grids: MLXArray?
+        /// Optional number of crops per image
+        public let numCrops: MLXArray?
 
         public init(
-            pixels: MLXArray, frames: [THW]? = nil
+            pixels: MLXArray,
+            frames: [THW]? = nil,
+            tokenPooling: MLXArray? = nil,
+            grids: MLXArray? = nil,
+            numCrops: MLXArray? = nil
         ) {
             self.pixels = pixels
             self.frames = frames
+            self.tokenPooling = tokenPooling
+            self.grids = grids
+            self.numCrops = numCrops
         }
     }
 
     /// Representation of prepared input video(s).
-    /// For now, this is virtually identical to ProcessedImage.
+    /// For now, this is similar to ProcessedImage.
     public struct ProcessedVideo {
 
         public let pixels: MLXArray
         public let frames: [THW]?
+        public let tokenPooling: MLXArray?
+        public let grids: MLXArray?
 
         public init(
-            pixels: MLXArray, frames: [THW]? = nil
+            pixels: MLXArray,
+            frames: [THW]? = nil,
+            tokenPooling: MLXArray? = nil,
+            grids: MLXArray? = nil
         ) {
             self.pixels = pixels
             self.frames = frames
+            self.tokenPooling = tokenPooling
+            self.grids = grids
         }
     }
 
