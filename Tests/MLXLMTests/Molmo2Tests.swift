@@ -24,6 +24,7 @@ private struct Molmo2TestTokenizer: Tokenizer {
     let vocabulary: [Int: String]
     let tokenMap: [String: Int]
     let templateTokens: [Int]
+    let validateMessages: (([Tokenizers.Message]) throws -> Void)?
 
     let bosTokenId: Int? = Molmo2TestTokenIds.bos
     let eosTokenId: Int? = Molmo2TestTokenIds.bos
@@ -33,7 +34,10 @@ private struct Molmo2TestTokenizer: Tokenizer {
     let unknownTokenId: Int? = Molmo2TestTokenIds.text
     let fuseUnknownTokens: Bool = false
 
-    init(templateTokens: [Int]) {
+    init(
+        templateTokens: [Int],
+        validateMessages: (([Tokenizers.Message]) throws -> Void)? = nil
+    ) {
         let tokens: [String: Int] = [
             "<|image|>": Molmo2TestTokenIds.imagePlaceholder,
             "<|video|>": Molmo2TestTokenIds.videoPlaceholder,
@@ -50,6 +54,7 @@ private struct Molmo2TestTokenizer: Tokenizer {
         self.tokenMap = tokens
         self.vocabulary = Dictionary(uniqueKeysWithValues: tokens.map { ($0.value, $0.key) })
         self.templateTokens = templateTokens
+        self.validateMessages = validateMessages
     }
 
     func tokenize(text: String) -> [String] {
@@ -79,36 +84,41 @@ private struct Molmo2TestTokenizer: Tokenizer {
         vocabulary[id]
     }
 
+    private func applyTemplate(messages: [Tokenizers.Message]) throws -> [Int] {
+        try validateMessages?(messages)
+        return templateTokens
+    }
+
     func applyChatTemplate(messages: [Tokenizers.Message]) throws -> [Int] {
-        templateTokens
+        try applyTemplate(messages: messages)
     }
 
     func applyChatTemplate(messages: [Tokenizers.Message], tools: [Tokenizers.ToolSpec]?) throws -> [Int] {
-        templateTokens
+        try applyTemplate(messages: messages)
     }
 
     func applyChatTemplate(
         messages: [Tokenizers.Message], tools: [Tokenizers.ToolSpec]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        templateTokens
+        try applyTemplate(messages: messages)
     }
 
     func applyChatTemplate(
         messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument
     ) throws -> [Int] {
-        templateTokens
+        try applyTemplate(messages: messages)
     }
 
     func applyChatTemplate(messages: [Tokenizers.Message], chatTemplate: String) throws -> [Int] {
-        templateTokens
+        try applyTemplate(messages: messages)
     }
 
     func applyChatTemplate(
         messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument?,
         addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?
     ) throws -> [Int] {
-        templateTokens
+        try applyTemplate(messages: messages)
     }
 
     func applyChatTemplate(
@@ -116,7 +126,7 @@ private struct Molmo2TestTokenizer: Tokenizer {
         addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        templateTokens
+        try applyTemplate(messages: messages)
     }
 }
 
@@ -193,6 +203,35 @@ final class Molmo2Tests: XCTestCase {
         XCTAssertEqual(tokenPooling.dim(1), 9)
         XCTAssertEqual(processedVideo.grids?.dim(0), 1)
         XCTAssertEqual(processedVideo.grids?.dim(1), 3)
+    }
+
+    func testMolmo2SystemPromptFolding() async throws {
+        let system = "You are a helpful assistant."
+
+        let tokenizer = Molmo2TestTokenizer(
+            templateTokens: [Molmo2TestTokenIds.imagePlaceholder],
+            validateMessages: { messages in
+                XCTAssertEqual(messages.count, 1)
+                XCTAssertEqual(messages.first?["role"] as? String, "user")
+                XCTAssertFalse(messages.contains(where: { ($0["role"] as? String) == "system" }))
+
+                guard let content = messages.first?["content"] as? [[String: String]] else {
+                    XCTFail("Expected message content array")
+                    return
+                }
+
+                let text = content.last(where: { $0["type"] == "text" })?["text"] ?? ""
+                XCTAssertTrue(text.contains(system))
+                XCTAssertTrue(text.contains("describe"))
+            })
+        let processor = Molmo2Processor(try makeProcessorConfiguration(), tokenizer: tokenizer)
+
+        let input = UserInput(
+            chat: [
+                .system(system),
+                .user("describe", images: [.ciImage(makeSolidImage())]),
+            ])
+        _ = try await processor.prepare(input: input)
     }
 
     func testMolmo2VitLayerClamp() throws {

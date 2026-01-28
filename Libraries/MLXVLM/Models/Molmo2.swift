@@ -170,7 +170,8 @@ public struct Molmo2Processor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = Molmo2MessageGenerator().generate(from: input)
+        var messages = Molmo2MessageGenerator().generate(from: input)
+        messages = foldSystemIntoFirstUserIfNeeded(messages)
         var promptTokens = try tokenizer.applyChatTemplate(messages: messages, tools: input.tools)
 
         if input.images.isEmpty && input.videos.isEmpty {
@@ -298,7 +299,93 @@ private struct Molmo2VideoResult {
 }
 
 private extension Molmo2Processor {
+    func foldSystemIntoFirstUserIfNeeded(_ messages: [MLXLMCommon.Message]) -> [MLXLMCommon.Message] {
+        var systemParts: [String] = []
+        var index = 0
+
+        while index < messages.count {
+            guard let role = messages[index]["role"] as? String else {
+                break
+            }
+            if role.lowercased() != "system" {
+                break
+            }
+            if let text = extractText(from: messages[index])?.trimmingCharacters(in: .whitespacesAndNewlines),
+                !text.isEmpty
+            {
+                systemParts.append(text)
+            }
+            index += 1
+        }
+
+        if index == 0 {
+            return messages
+        }
+
+        let prefix = systemParts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        var remaining = Array(messages.dropFirst(index))
+        guard !prefix.isEmpty else {
+            return remaining
+        }
+
+        if remaining.isEmpty {
+            return [
+                [
+                    "role": "user",
+                    "content": [["type": "text", "text": prefix]],
+                ]
+            ]
+        }
+
+        if let userIndex = remaining.firstIndex(where: { ($0["role"] as? String)?.lowercased() == "user" }) {
+            remaining[userIndex] = prefixText(prefix, in: remaining[userIndex])
+            return remaining
+        }
+
+        let userMessage: MLXLMCommon.Message = [
+            "role": "user",
+            "content": [["type": "text", "text": prefix]],
+        ]
+        return [userMessage] + remaining
+    }
+
+    private func extractText(from message: MLXLMCommon.Message) -> String? {
+        if let content = message["content"] as? String {
+            return content
+        }
+        if let segments = message["content"] as? [[String: String]] {
+            return segments.last(where: { $0["type"] == "text" })?["text"]
+        }
+        return nil
+    }
+
+    private func prefixText(_ prefix: String, in message: MLXLMCommon.Message) -> MLXLMCommon.Message {
+        var updated = message
+
+        if var segments = updated["content"] as? [[String: String]] {
+            if let textIndex = segments.lastIndex(where: { $0["type"] == "text" }) {
+                var textSegment = segments[textIndex]
+                let existing = textSegment["text"] ?? ""
+                textSegment["text"] = existing.isEmpty ? prefix : "\(prefix)\n\n\(existing)"
+                segments[textIndex] = textSegment
+            } else {
+                segments.append(["type": "text", "text": prefix])
+            }
+            updated["content"] = segments
+            return updated
+        }
+
+        if let existing = updated["content"] as? String {
+            updated["content"] = existing.isEmpty ? prefix : "\(prefix)\n\n\(existing)"
+        } else {
+            updated["content"] = prefix
+        }
+
+        return updated
+    }
+
     func processImages(
+
         _ images: [UserInput.Image],
         processing: UserInput.Processing?,
         tokenIds: Molmo2TokenIds
@@ -1596,17 +1683,17 @@ fileprivate final class Molmo2VisionTransformer: Module {
         hiddenStates = addPosEmb(hiddenStates, patchNum: patchNum)
 
         let wanted = Set(layers)
-        var outputs: [MLXArray] = []
-        outputs.reserveCapacity(layers.count)
+        var outputsByIndex: [Int: MLXArray] = [:]
+        outputsByIndex.reserveCapacity(layers.count)
 
         for (index, block) in transformer.enumerated() {
             hiddenStates = block(hiddenStates)
             if wanted.contains(index) {
-                outputs.append(hiddenStates)
+                outputsByIndex[index] = hiddenStates
             }
         }
 
-        return outputs
+        return layers.compactMap { outputsByIndex[$0] }
     }
 }
 
@@ -1622,7 +1709,8 @@ fileprivate final class Molmo2ImageProjectorMLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        w2(silu(w1(x)) * w3(x))
+        let hidden = silu(w1(x)) * w3(x)
+        return w2(hidden.asType(.float32))
     }
 }
 
@@ -1819,7 +1907,7 @@ public final class Molmo2: Module, VLMModel, KVCacheDimensionProvider {
         let textEmbeds = languageModel.embedTokens(safeInputIds)
 
         let dtype = visionTower.imageVit.patchEmbedding.weight.dtype
-        let imageFeatures = visionTower(images.asType(dtype), pooledPatchesIdx: tokenPooling).asType(textEmbeds.dtype)
+        let imageFeatures = visionTower(images.asType(dtype), pooledPatchesIdx: tokenPooling).asType(.float32)
 
         let flatIds = safeInputIds.flattened()
         let isPatch = flatIds .== MLXArray(config.imagePatchId)
@@ -1829,7 +1917,7 @@ public final class Molmo2: Module, VLMModel, KVCacheDimensionProvider {
             throw Molmo2ModelError.featureTokenMismatch(expected: positions.count, actual: imageFeatures.dim(0))
         }
 
-        let flatEmbeds = textEmbeds.reshaped(-1, textEmbeds.dim(2))
+        let flatEmbeds = textEmbeds.asType(.float32).reshaped(-1, textEmbeds.dim(2))
         if !positions.isEmpty {
             let indexArray = MLXArray(positions.map(UInt32.init))
             flatEmbeds[indexArray] = flatEmbeds[indexArray] + imageFeatures
