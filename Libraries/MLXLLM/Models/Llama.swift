@@ -21,11 +21,11 @@ func computeBaseFrequency(
         return base
     }
 
-    guard case .float(let factor) = ropeScaling["factor"],
-        case .float(let lowFreqFactor) = ropeScaling["low_freq_factor"] ?? .float(1.0),
-        case .float(let highFreqFactor) = ropeScaling["high_freq_factor"] ?? .float(4.0),
-        case .float(let oldContextLen) = ropeScaling["original_max_position_embeddings"]
-            ?? .float(8192)
+    guard let factor = ropeScaling["factor"]?.asFloat(),
+        let lowFreqFactor = (ropeScaling["low_freq_factor"] ?? .float(1.0)).asFloat(),
+        let highFreqFactor = (ropeScaling["high_freq_factor"] ?? .float(4.0)).asFloat(),
+        let oldContextLen =
+            (ropeScaling["original_max_position_embeddings"] ?? .float(8192)).asFloat()
     else {
         return base
     }
@@ -87,11 +87,11 @@ class LlamaDynamicNTKScalingRoPE: Module {
         }
 
         guard let ropeScaling = ropeScaling,
-            case .float(let factor) = ropeScaling["factor"],
-            case .float(let lowFreqFactor) = ropeScaling["low_freq_factor"] ?? .float(1.0),
-            case .float(let highFreqFactor) = ropeScaling["high_freq_factor"] ?? .float(4.0),
-            case .float(let oldContextLen) = ropeScaling["original_max_position_embeddings"]
-                ?? .float(8192),
+            let factor = ropeScaling["factor"]?.asFloat(),
+            let lowFreqFactor = (ropeScaling["low_freq_factor"] ?? .float(1.0)).asFloat(),
+            let highFreqFactor = (ropeScaling["high_freq_factor"] ?? .float(4.0)).asFloat(),
+            let oldContextLen =
+                (ropeScaling["original_max_position_embeddings"] ?? .float(8192)).asFloat(),
             let base
         else {
             freqs = nil
