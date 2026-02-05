@@ -86,14 +86,18 @@ class LlamaDynamicNTKScalingRoPE: Module {
             return
         }
 
-        guard let ropeScaling = ropeScaling,
-            let factor = ropeScaling["factor"]?.asFloat(),
-            let lowFreqFactor = (ropeScaling["low_freq_factor"] ?? .float(1.0)).asFloat(),
-            let highFreqFactor = (ropeScaling["high_freq_factor"] ?? .float(4.0)).asFloat(),
-            let oldContextLen =
-                (ropeScaling["original_max_position_embeddings"] ?? .float(8192)).asFloat(),
-            let base
-        else {
+        guard let ropeScaling else {
+            freqs = nil
+            return
+        }
+
+        let factor = ropeScaling["factor"]?.asFloat()
+        let lowFreqFactor = (ropeScaling["low_freq_factor"] ?? .float(1.0)).asFloat()
+        let highFreqFactor = (ropeScaling["high_freq_factor"] ?? .float(4.0)).asFloat()
+        let oldContextLen =
+            (ropeScaling["original_max_position_embeddings"] ?? .float(8192)).asFloat()
+
+        guard let factor, let lowFreqFactor, let highFreqFactor, let oldContextLen, let base else {
             freqs = nil
             return
         }
@@ -166,11 +170,12 @@ class LlamaAttention: Module {
             base: args.ropeTheta,
             scale: 1.0,
             ropeType: {
-                if case .string(let value) = args.ropeScaling?["type"] {
+                if let ropeTypeVal = args.ropeScaling?["type"] ?? args.ropeScaling?["rope_type"],
+                    case .string(let value) = ropeTypeVal
+                {
                     return value
-                } else {
-                    return "default"
                 }
+                return "default"
             }(),
             ropeScaling: args.ropeScaling)
     }
