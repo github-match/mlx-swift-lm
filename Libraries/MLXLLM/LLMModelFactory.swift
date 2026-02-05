@@ -434,8 +434,12 @@ private struct LLMUserInputProcessor: UserInputProcessor {
     func prepare(input: UserInput) throws -> LMInput {
         let messages = messageGenerator.generate(from: input)
         do {
-            let promptTokens = try tokenizer.applyChatTemplate(
+            let rawTokens = try tokenizer.applyChatTemplate(
                 messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+
+            // Normalize tokens to remove extra whitespace after BOS (swift-jinja workaround).
+            // This is idempotent: if swift-jinja is fixed upstream, this is a no-op.
+            let promptTokens = tokenizer.normalizePromptTokens(rawTokens)
 
             return LMInput(tokens: MLXArray(promptTokens))
         } catch TokenizerError.missingChatTemplate {
