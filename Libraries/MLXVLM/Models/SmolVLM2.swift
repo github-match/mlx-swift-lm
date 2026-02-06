@@ -221,7 +221,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = Qwen2VLMessageGenerator().generate(from: input)  // TODO: Create SmolVLM2MessageGenerator
+        let messages = SmolVLM2MessageGenerator().generate(from: input)
 
         if input.images.isEmpty && input.videos.isEmpty {
             // No image scenario
@@ -360,5 +360,33 @@ public struct SmolVLMProcessor: UserInputProcessor {
                 image: .init(pixels: transposedFrames, frames: thwFrames)
             )
         }
+    }
+}
+
+/// Message generator for SmolVLM2.
+///
+/// SmolVLM2 expects user multimodal content in media-first order.
+/// For image prompts this produces:
+/// `[{type:image}, {type:text}]` instead of `[{type:text}, {type:image}]`.
+public struct SmolVLM2MessageGenerator: MessageGenerator {
+    public init() {}
+
+    public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        var content: [MLXLMCommon.Message] = []
+
+        if message.role == .user {
+            content += message.images.map { _ in ["type": "image"] }
+            content += message.videos.map { _ in ["type": "video"] }
+            content += [["type": "text", "text": message.content]]
+        } else {
+            content += [["type": "text", "text": message.content]]
+            content += message.images.map { _ in ["type": "image"] }
+            content += message.videos.map { _ in ["type": "video"] }
+        }
+
+        return [
+            "role": message.role.rawValue,
+            "content": content,
+        ]
     }
 }
