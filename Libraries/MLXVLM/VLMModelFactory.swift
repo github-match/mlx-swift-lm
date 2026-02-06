@@ -216,6 +216,12 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             "What is the main action or notable event happening in this segment? Describe it in one brief sentence."
     )
 
+    static public let smolvlm2_256m_video_instruct = ModelConfiguration(
+        id: "mlx-community/SmolVLM2-256M-Video-Instruct-mlx",
+        defaultPrompt:
+            "What is the main action or notable event happening in this segment? Describe it in one brief sentence."
+    )
+
     static public let fastvlm = ModelConfiguration(
         id: "mlx-community/FastVLM-0.5B-bf16",
         defaultPrompt: "Describe this image in detail."
@@ -234,6 +240,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma3_12B_qat_4bit,
             gemma3_27B_qat_4bit,
             smolvlm,
+            smolvlm2_256m_video_instruct,
             fastvlm,
         ]
     }

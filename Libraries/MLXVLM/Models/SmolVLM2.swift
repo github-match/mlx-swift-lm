@@ -92,7 +92,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
     var maxProcessingImageSize: CGFloat { CGFloat(config.size.longestEdge) }  // 2048
     var fixedImageSize: CGFloat { CGFloat(config.maxImageSize.longestEdge) }  // 384 for big models, 512 for small models (200-500M)
     var imageSequenceLength: Int { config.imageSequenceLength }
-    var maxVideoFrames: Int { 20 /*config.videoSampling.maxFrames*/ }
+    var maxVideoFrames: Int { config.videoSampling.maxFrames }
     var targetVideoFPS: Double { Double(config.videoSampling.fps) }
 
     let defaultVideoSystemMessage =
@@ -313,7 +313,8 @@ public struct SmolVLMProcessor: UserInputProcessor {
                 targetFPS: { duration in
                     // 1 fps for duration >= 10s, apply a multiplier if smaller
                     max((10 - 0.9 * duration.seconds) * targetVideoFPS, 1)
-                }
+                },
+                maxFrames: maxVideoFrames
             ) { frame in
 
                 let processedFrame = frame.frame
