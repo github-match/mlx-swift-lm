@@ -24,6 +24,100 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
+    private func parseBoolContextValue(_ value: any Sendable) -> Bool? {
+        switch value {
+        case let boolValue as Bool:
+            return boolValue
+        case let intValue as Int:
+            return intValue != 0
+        case let int32Value as Int32:
+            return int32Value != 0
+        case let int64Value as Int64:
+            return int64Value != 0
+        case let uintValue as UInt:
+            return uintValue != 0
+        case let uint32Value as UInt32:
+            return uint32Value != 0
+        case let uint64Value as UInt64:
+            return uint64Value != 0
+        case let doubleValue as Double:
+            return doubleValue != 0
+        case let floatValue as Float:
+            return floatValue != 0
+        case let stringValue as String:
+            let normalized = stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            switch normalized {
+            case "1", "true", "yes", "on":
+                return true
+            case "0", "false", "no", "off":
+                return false
+            default:
+                return nil
+            }
+        case let number as NSNumber:
+            return number.boolValue
+        default:
+            return nil
+        }
+    }
+
+    private func chatTemplateOptions(
+        additionalContext: [String: any Sendable]?
+    ) -> (addGenerationPrompt: Bool, addSpecialTokens: Bool, context: [String: any Sendable]?) {
+        guard var context = additionalContext else {
+            return (true, false, nil)
+        }
+
+        var addGenerationPrompt = true
+        if let rawValue = context["add_generation_prompt"],
+            let parsed = parseBoolContextValue(rawValue)
+        {
+            addGenerationPrompt = parsed
+        }
+        context.removeValue(forKey: "add_generation_prompt")
+
+        var addSpecialTokens = false
+        if let rawValue = context["add_special_tokens"],
+            let parsed = parseBoolContextValue(rawValue)
+        {
+            addSpecialTokens = parsed
+        }
+        context.removeValue(forKey: "add_special_tokens")
+
+        return (addGenerationPrompt, addSpecialTokens, context.isEmpty ? nil : context)
+    }
+
+    private func addSpecialTokenIDForChatTemplate() -> Int? {
+        // HF processor(add_special_tokens=True) appends <|endoftext|> for Qwen3-VL.
+        // tokenizer.eosTokenId may point to <|im_end|>, so prefer explicit <|endoftext|>.
+        let endOfText = tokenizer.encode(text: "<|endoftext|>", addSpecialTokens: false)
+        if endOfText.count == 1 {
+            return endOfText[0]
+        }
+        return tokenizer.eosTokenId
+    }
+
+    private func appendEOSTokenIfNeeded(_ tokens: [Int]) -> [Int] {
+        guard let eosTokenId = addSpecialTokenIDForChatTemplate() else { return tokens }
+        guard tokens.last != eosTokenId else { return tokens }
+
+        var updated = tokens
+        updated.append(eosTokenId)
+        return updated
+    }
+
+    private func normalizeTrailingNewlineToken(_ tokens: [Int]) -> [Int] {
+        guard let lastToken = tokens.last else { return tokens }
+        let newline = tokenizer.encode(text: "\n", addSpecialTokens: false)
+        let doubleNewline = tokenizer.encode(text: "\n\n", addSpecialTokens: false)
+        guard newline.count == 1, doubleNewline.count == 1 else { return tokens }
+        guard lastToken == doubleNewline[0] else { return tokens }
+
+        var normalized = tokens
+        normalized[normalized.count - 1] = newline[0]
+        return normalized
+    }
+
     private func preprocess(image: CIImage, resizedSize: CGSize) -> CIImage {
         image
             .toSRGB()
@@ -50,20 +144,12 @@ public struct Qwen3VLProcessor: UserInputProcessor {
 
         let targetSize = CGSize(width: resizedWidth, height: resizedHeight)
 
-        let resampled = processed.map { MediaProcessing.resampleBicubic($0, to: targetSize) }
-
-        let normalized =
-            resampled
-            .map {
-                MediaProcessing.normalize(
-                    $0,
-                    mean: config.imageMeanTuple,
-                    std: config.imageStdTuple)
-            }
-            .map { MediaProcessing.asMLXArray($0) }
-
+        let processedImages = processed.map { image in
+            preprocess(image: image, resizedSize: targetSize)
+                .asMLXArray()
+        }
         return try QwenVL.patchify(
-            images: normalized,
+            images: processedImages,
             mergeSize: config.mergeSize,
             patchSize: config.patchSize,
             temporalPatchSize: config.temporalPatchSize)
@@ -71,13 +157,34 @@ public struct Qwen3VLProcessor: UserInputProcessor {
 
     public func prepare(input: UserInput) async throws -> LMInput {
         let messages = Qwen3VLMessageGenerator().generate(from: input)
-        var promptTokens = try tokenizer.applyChatTemplate(messages: messages, tools: input.tools)
-
-        if input.images.isEmpty, input.videos.isEmpty {
-            let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray).asType(.int8)
-            return LMInput(text: .init(tokens: promptArray, mask: mask))
+        let templateOptions = chatTemplateOptions(additionalContext: input.additionalContext)
+        let initialPromptTokens: [Int]
+        if let templateContext = templateOptions.context {
+            initialPromptTokens = try tokenizer.applyChatTemplate(
+                messages: messages,
+                chatTemplate: nil,
+                addGenerationPrompt: templateOptions.addGenerationPrompt,
+                truncation: false,
+                maxLength: nil,
+                tools: input.tools,
+                additionalContext: templateContext
+            )
+        } else if templateOptions.addGenerationPrompt {
+            initialPromptTokens = try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: input.tools
+            )
+        } else {
+            initialPromptTokens = try tokenizer.applyChatTemplate(
+                messages: messages,
+                chatTemplate: nil,
+                addGenerationPrompt: false,
+                truncation: false,
+                maxLength: nil,
+                tools: input.tools
+            )
         }
+        var promptTokens = initialPromptTokens
 
         var processedImage: LMInput.ProcessedImage?
         if !input.images.isEmpty {
@@ -142,6 +249,11 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     mergeSize: config.mergeSize,
                     tokenizer: tokenizer)
             }
+        }
+
+        promptTokens = normalizeTrailingNewlineToken(promptTokens)
+        if templateOptions.addSpecialTokens {
+            promptTokens = appendEOSTokenIfNeeded(promptTokens)
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
@@ -535,26 +647,51 @@ enum Qwen3VLVision {
             keys = keys.reshaped(1, sequenceLength, numHeads, headDim).transposed(0, 2, 1, 3)
             values = values.reshaped(1, sequenceLength, numHeads, headDim).transposed(0, 2, 1, 3)
 
-            var mask = ones([1, sequenceLength, sequenceLength], dtype: queries.dtype)
-            mask = mask * MLXArray(-1e9, dtype: queries.dtype)
-
+            // Match HF Qwen3-VL non-flash path: split by cu_seqlens and run attention
+            // independently per sequence chunk (no additive full-mask approximation).
             let seqlens = cuSeqlens.asArray(Int.self)
-            for idx in 1 ..< seqlens.count {
-                let start = seqlens[idx - 1]
-                let end = seqlens[idx]
-                mask[0..., start ..< end, start ..< end] = MLXArray(0, dtype: queries.dtype)
+            var attendedPerChunk: [MLXArray] = []
+            attendedPerChunk.reserveCapacity(max(1, seqlens.count - 1))
+            var coveredTokens = 0
+
+            if seqlens.count > 1 {
+                for idx in 1 ..< seqlens.count {
+                    let start = max(0, seqlens[idx - 1])
+                    let end = min(sequenceLength, seqlens[idx])
+                    guard end > start else { continue }
+
+                    let qChunk = queries[0..., 0..., start ..< end, 0...]
+                    let kChunk = keys[0..., 0..., start ..< end, 0...]
+                    let vChunk = values[0..., 0..., start ..< end, 0...]
+
+                    let chunkOutput = MLXFast.scaledDotProductAttention(
+                        queries: qChunk,
+                        keys: kChunk,
+                        values: vChunk,
+                        scale: scale,
+                        mask: .none
+                    )
+                    attendedPerChunk.append(chunkOutput)
+                    coveredTokens += (end - start)
+                }
             }
 
-            let attended = MLXFast.scaledDotProductAttention(
-                queries: queries,
-                keys: keys,
-                values: values,
-                scale: scale,
-                mask: .array(mask)
-            )
-            .transposed(0, 2, 1, 3)
-            .reshaped(sequenceLength, -1)
+            let attended4D: MLXArray
+            if !attendedPerChunk.isEmpty, coveredTokens == sequenceLength {
+                attended4D = concatenated(attendedPerChunk, axis: 2)
+            } else {
+                attended4D = MLXFast.scaledDotProductAttention(
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    scale: scale,
+                    mask: .none
+                )
+            }
 
+            let attended = attended4D
+                .transposed(0, 2, 1, 3)
+                .reshaped(sequenceLength, -1)
             return proj(attended)
         }
     }
@@ -567,7 +704,8 @@ enum Qwen3VLVision {
         init(dim: Int, hiddenDim: Int) {
             _linear1.wrappedValue = Linear(dim, hiddenDim, bias: true)
             _linear2.wrappedValue = Linear(hiddenDim, dim, bias: true)
-            _activation.wrappedValue = GELU(approximation: .fast)
+            // Match HF Qwen3-VL vision MLP (nn.GELU, non-fast approximation).
+            _activation.wrappedValue = GELU()
         }
 
         func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -593,11 +731,16 @@ enum Qwen3VLVision {
             cuSeqlens: MLXArray,
             rotaryPosEmb: MLXArray
         ) -> MLXArray {
-            var states = hiddenStates
-            states =
-                states + attention(norm1(states), cuSeqlens: cuSeqlens, rotaryPosEmb: rotaryPosEmb)
-            states = states + mlp(norm2(states))
-            return states
+            let norm1Output = norm1(hiddenStates)
+            let attentionOutput = attention(
+                norm1Output,
+                cuSeqlens: cuSeqlens,
+                rotaryPosEmb: rotaryPosEmb
+            )
+            let postAttentionResidual = hiddenStates + attentionOutput
+            let norm2Output = norm2(postAttentionResidual)
+            let mlpOutput = mlp(norm2Output)
+            return postAttentionResidual + mlpOutput
         }
     }
 
@@ -863,7 +1006,8 @@ enum Qwen3VLVision {
             var deepstackOutputs: [MLXArray] = []
 
             for (index, block) in blocks.enumerated() {
-                hiddenStates = block(hiddenStates, cuSeqlens: cuSeqlens, rotaryPosEmb: rotaryEmbeds)
+                hiddenStates = block(
+                    hiddenStates, cuSeqlens: cuSeqlens, rotaryPosEmb: rotaryEmbeds)
                 if let dsIndex = deepstackVisualIndexes.firstIndex(of: index) {
                     let feature = deepstackMergers[dsIndex](hiddenStates)
                     deepstackOutputs.append(feature)
@@ -1239,7 +1383,8 @@ enum Qwen3VLLanguage {
             deepstackEmbeds: [MLXArray]?,
             pixelValues: MLXArray?,
             imageGridTHW: [THW]?,
-            videoGridTHW: [THW]?
+            videoGridTHW: [THW]?,
+            includeHiddenStates: Bool = false
         ) -> LMOutput {
             if pixelValues != nil {
                 ropeDeltas = nil
@@ -1298,7 +1443,7 @@ enum Qwen3VLLanguage {
                 }
             }
 
-            var output = model(
+            let hiddenStates = model(
                 inputIds,
                 cache: cache,
                 inputEmbeddings: inputEmbeddings,
@@ -1307,13 +1452,17 @@ enum Qwen3VLLanguage {
                 visualMask: visualMask,
                 deepstackEmbeds: deepstackEmbeds)
 
+            var output = hiddenStates
             if let lmHead {
                 output = lmHead(output)
             } else {
                 output = model.embedTokens.asLinear(output)
             }
 
-            return LMOutput(logits: output)
+            return LMOutput(
+                logits: output,
+                hiddenStates: includeHiddenStates ? hiddenStates : nil
+            )
         }
 
     }
@@ -1540,11 +1689,10 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         var specialMask = (imageMask .|| videoMask)
 
         let nImageTokens = specialMask.sum().item(Int.self)
+        let nImageFeatures = imageFeatures.dim(0)
 
         specialMask = expandedDimensions(specialMask, axis: -1)
         let maskExpanded = broadcast(specialMask, to: inputEmbeds.shape)
-
-        let nImageFeatures = imageFeatures.dim(0)
         let nImageMaskElements = maskExpanded.sum().item(Int.self)
         let imageFeatureSize = imageFeatures.size
 
@@ -1676,7 +1824,9 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
             deepstackEmbeds: deepstackEmbeds,
             pixelValues: pixelValues,
             imageGridTHW: imageFrames,
-            videoGridTHW: videoFrames)
+            videoGridTHW: videoFrames,
+            includeHiddenStates: true
+        )
 
         return .logits(languageOutput)
     }
@@ -1753,7 +1903,13 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
         let imageContent = message.images.map { _ in
             ["type": "image"]
         }
-        let textContent = [["type": "text", "text": message.content]]
+        let trimmedText = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let textContent: [[String: String]]
+        if trimmedText.isEmpty {
+            textContent = []
+        } else {
+            textContent = [["type": "text", "text": trimmedText]]
+        }
         let videoContent = message.videos.map { _ in
             ["type": "video"]
         }

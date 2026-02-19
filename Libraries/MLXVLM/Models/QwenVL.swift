@@ -176,36 +176,49 @@ public struct QwenVL {
         in promptTokens: [Int], frames: [THW], paddingToken: String, mergeSize: Int,
         tokenizer: any Tokenizer
     ) throws -> [Int] {
-        // Replace single padding token with correct number for each image or video frame
-        let placeholderTokens = tokenizer.encode(
-            text: "<|vision_start|>\(paddingToken)<|vision_end|>")
-        let placeholderRanges = promptTokens.ranges(of: placeholderTokens)
-        guard placeholderRanges.count == frames.count else {
-            throw VLMError.processing(
-                "Number of placeholder tokens does not match number of frames")
+        // Mirror HF Qwen3VLProcessor behavior: expand each padding token occurrence
+        // to the required number of multimodal placeholder tokens.
+        guard let paddingTokenId = tokenizer.convertTokenToId(paddingToken) else {
+            throw VLMError.processing("Unable to resolve token id for \(paddingToken)")
         }
-        let mergeLength = mergeSize * mergeSize
-        let replacementSequences = frames.map { frame in
-            let paddingCount = frame.product / mergeLength
-            return tokenizer.encode(
-                text:
-                    "<|vision_start|>\(Array(repeating: paddingToken, count: paddingCount).joined())<|vision_end|>"
+
+        let placeholderIndices = promptTokens.enumerated().compactMap { index, token in
+            token == paddingTokenId ? index : nil
+        }
+        guard placeholderIndices.count == frames.count else {
+            throw VLMError.processing(
+                "Number of \(paddingToken) tokens (\(placeholderIndices.count)) does not match number of frames (\(frames.count))"
             )
         }
-        // Build the final array
+
+        let mergeLength = mergeSize * mergeSize
+        var replacementCounts: [Int] = []
+        replacementCounts.reserveCapacity(frames.count)
+        for frame in frames {
+            let tokenCount = frame.product
+            guard tokenCount % mergeLength == 0 else {
+                throw VLMError.processing(
+                    "Frame grid \(frame.values) is not divisible by merge length \(mergeLength)"
+                )
+            }
+            replacementCounts.append(tokenCount / mergeLength)
+        }
+
+        // Build final token stream by replacing each single padding token in order.
         var result: [Int] = []
-        var currentIndex = promptTokens.startIndex
-        for (range, replacement) in zip(placeholderRanges, replacementSequences) {
-            // Add tokens before the placeholder
-            result.append(contentsOf: promptTokens[currentIndex ..< range.lowerBound])
-            // Add replacement sequence
-            result.append(contentsOf: replacement)
-            currentIndex = range.upperBound
+        result.reserveCapacity(promptTokens.count + replacementCounts.reduce(0, +))
+
+        var replacementIndex = 0
+        for token in promptTokens {
+            if token == paddingTokenId {
+                let count = replacementCounts[replacementIndex]
+                result.append(contentsOf: repeatElement(paddingTokenId, count: count))
+                replacementIndex += 1
+            } else {
+                result.append(token)
+            }
         }
-        // Add any remaining tokens after the last replacement
-        if currentIndex < promptTokens.endIndex {
-            result.append(contentsOf: promptTokens[currentIndex...])
-        }
+
         return result
     }
 
