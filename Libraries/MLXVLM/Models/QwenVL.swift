@@ -176,18 +176,28 @@ public struct QwenVL {
         in promptTokens: [Int], frames: [THW], paddingToken: String, mergeSize: Int,
         tokenizer: any Tokenizer
     ) throws -> [Int] {
-        // Mirror HF Qwen3VLProcessor behavior: expand each padding token occurrence
+        // Mirror HF Qwen3VLProcessor behavior: expand each placeholder occurrence
         // to the required number of multimodal placeholder tokens.
         guard let paddingTokenId = tokenizer.convertTokenToId(paddingToken) else {
             throw VLMError.processing("Unable to resolve token id for \(paddingToken)")
         }
 
-        let placeholderIndices = promptTokens.enumerated().compactMap { index, token in
+        let allPlaceholderIndices = promptTokens.enumerated().compactMap { index, token in
             token == paddingTokenId ? index : nil
         }
+        let placeholderIndices = scopedPlaceholderIndices(
+            promptTokens: promptTokens,
+            allPlaceholderIndices: allPlaceholderIndices,
+            paddingTokenId: paddingTokenId,
+            tokenizer: tokenizer
+        )
+
         guard placeholderIndices.count == frames.count else {
+            let scopedCountDescription = placeholderIndices.count == allPlaceholderIndices.count
+                ? "\(placeholderIndices.count)"
+                : "\(placeholderIndices.count) (scoped), \(allPlaceholderIndices.count) (all)"
             throw VLMError.processing(
-                "Number of \(paddingToken) tokens (\(placeholderIndices.count)) does not match number of frames (\(frames.count))"
+                "Number of \(paddingToken) tokens (\(scopedCountDescription)) does not match number of frames (\(frames.count))"
             )
         }
 
@@ -204,13 +214,14 @@ public struct QwenVL {
             replacementCounts.append(tokenCount / mergeLength)
         }
 
-        // Build final token stream by replacing each single padding token in order.
+        // Build final token stream by replacing only the resolved placeholder positions in order.
         var result: [Int] = []
-        result.reserveCapacity(promptTokens.count + replacementCounts.reduce(0, +))
+        result.reserveCapacity(promptTokens.count - placeholderIndices.count + replacementCounts.reduce(0, +))
 
+        let placeholderIndexSet = Set(placeholderIndices)
         var replacementIndex = 0
-        for token in promptTokens {
-            if token == paddingTokenId {
+        for (index, token) in promptTokens.enumerated() {
+            if placeholderIndexSet.contains(index) {
                 let count = replacementCounts[replacementIndex]
                 result.append(contentsOf: repeatElement(paddingTokenId, count: count))
                 replacementIndex += 1
@@ -220,6 +231,40 @@ public struct QwenVL {
         }
 
         return result
+    }
+
+    private static func scopedPlaceholderIndices(
+        promptTokens: [Int],
+        allPlaceholderIndices: [Int],
+        paddingTokenId: Int,
+        tokenizer: any Tokenizer
+    ) -> [Int] {
+        guard let visionStartTokenId = tokenizer.convertTokenToId("<|vision_start|>"),
+            let visionEndTokenId = tokenizer.convertTokenToId("<|vision_end|>")
+        else {
+            return allPlaceholderIndices
+        }
+
+        var scoped: [Int] = []
+        scoped.reserveCapacity(allPlaceholderIndices.count)
+
+        var visionDepth = 0
+        for (index, token) in promptTokens.enumerated() {
+            if token == visionStartTokenId {
+                visionDepth += 1
+                continue
+            }
+            if token == visionEndTokenId {
+                visionDepth = max(0, visionDepth - 1)
+                continue
+            }
+            if token == paddingTokenId, visionDepth > 0 {
+                scoped.append(index)
+            }
+        }
+
+        // Keep compatibility with templates that emit placeholders without explicit vision markers.
+        return scoped.isEmpty ? allPlaceholderIndices : scoped
     }
 
     static func patchify(images: [MLXArray], mergeSize: Int, patchSize: Int, temporalPatchSize: Int)

@@ -63,9 +63,12 @@ public struct Qwen3VLProcessor: UserInputProcessor {
 
     private func chatTemplateOptions(
         additionalContext: [String: any Sendable]?
-    ) -> (addGenerationPrompt: Bool, addSpecialTokens: Bool, context: [String: any Sendable]?) {
+    ) -> (
+        addGenerationPrompt: Bool, addSpecialTokens: Bool, includeHiddenStates: Bool,
+        context: [String: any Sendable]?
+    ) {
         guard var context = additionalContext else {
-            return (true, false, nil)
+            return (true, false, false, nil)
         }
 
         var addGenerationPrompt = true
@@ -84,7 +87,20 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         }
         context.removeValue(forKey: "add_special_tokens")
 
-        return (addGenerationPrompt, addSpecialTokens, context.isEmpty ? nil : context)
+        var includeHiddenStates = addSpecialTokens
+        if let rawValue = context["include_hidden_states"],
+            let parsed = parseBoolContextValue(rawValue)
+        {
+            includeHiddenStates = parsed
+        }
+        context.removeValue(forKey: "include_hidden_states")
+
+        return (
+            addGenerationPrompt,
+            addSpecialTokens,
+            includeHiddenStates,
+            context.isEmpty ? nil : context
+        )
     }
 
     private func addSpecialTokenIDForChatTemplate() -> Int? {
@@ -257,7 +273,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
+        let mask = templateOptions.includeHiddenStates ? ones(like: promptArray).asType(.int8) : nil
 
         return LMInput(
             text: .init(tokens: promptArray, mask: mask),
@@ -1825,7 +1841,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
             pixelValues: pixelValues,
             imageGridTHW: imageFrames,
             videoGridTHW: videoFrames,
-            includeHiddenStates: true
+            includeHiddenStates: input.text.mask != nil
         )
 
         return .logits(languageOutput)
